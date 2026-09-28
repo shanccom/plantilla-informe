@@ -17,7 +17,7 @@ import shutil
 import sys
 from pathlib import Path
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 PROG = "informe"
 
@@ -72,19 +72,6 @@ PATTERNS = {
     "logo_izquierdo": r'(?m)^(#let\s+logo-izquierdo\s*=\s*)(".*?"|none)(?P<resto>.*)$',
     "logo_derecho": r'(?m)^(#let\s+logo-derecho\s*=\s*)(".*?"|none)(?P<resto>.*)$',
 }
-
-#: Etiquetas que se muestran al preguntar por cada campo.
-PROMPTS = {
-    "titulo": "Título del informe",
-    "subtitulo": "Subtítulo (vacío para no ponerlo)",
-    "curso": "Curso",
-    "docente": "Docente",
-    "lugar": "Lugar",
-    "fecha": "Fecha",
-    "integrantes": "Integrante (vacío para terminar)",
-    "idioma": "Idioma del documento (es/en)",
-}
-
 
 class InformeError(Exception):
     """Error esperado, mostrado al usuario sin traza."""
@@ -202,98 +189,34 @@ def existing_targets(destination: Path, entries) -> list:
 
 
 # --------------------------------------------------------------------------
-# Preguntas al usuario
+# Datos de portada
 # --------------------------------------------------------------------------
 
-def ask(prompt: str, default=None) -> str:
-    """Pregunta algo. Si no hay terminal, devuelve el valor por defecto."""
-    if not sys.stdin.isatty():
-        return "" if default is None else default
-    suffix = ""
-    if default is not None and default != "":
-        suffix = " [%s]" % default
-    try:
-        answer = input("%s%s: " % (prompt, suffix)).strip()
-    except (EOFError, KeyboardInterrupt):
-        print()
-        raise InformeError("cancelado por el usuario")
-    return answer or ("" if default is None else default)
-
-
-def ask_yes_no(prompt: str, default: bool) -> bool:
-    if not sys.stdin.isatty():
-        return default
-    suffix = " [S/n]" if default else " [s/N]"
-    try:
-        answer = input("%s%s: " % (prompt, suffix)).strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        print()
-        raise InformeError("cancelado por el usuario")
-    if not answer:
-        return default
-    return answer.startswith(("s", "y", "t"))
-
-
-def ask_integrantes(default) -> list:
-    """Pregunta por los integrantes, uno por línea, hasta dejar la línea vacía."""
-    if not sys.stdin.isatty():
-        return list(default)
-
-    print("\nIntegrantes (uno por línea, línea vacía para terminar):")
-    names = []
-    while True:
-        hint = "Apellido Nombre"
-        try:
-            answer = input("  %s: " % hint).strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            raise InformeError("cancelado por el usuario")
-        if not answer:
-            break
-        names.append(answer)
-    if not names:
-        names = list(default)
-    print("  -> %d integrante(s)" % len(names))
-    return names
-
-
 def collect_values(args, out: Out) -> dict:
-    """Reúne los datos de portada: primero las banderas, luego las preguntas."""
-    interactive = not args.no_interactive and sys.stdin.isatty()
-
+    """Reúne los datos de portada: las banderas o los valores por defecto."""
     values = {}
 
-    def resolve(cli_value, default, question):
-        if cli_value is not None:
-            return cli_value
-        if interactive:
-            return ask(question, default)
-        return default
+    def resolve(cli_value, default):
+        return cli_value if cli_value is not None else default
 
-    values["titulo"] = resolve(args.titulo, DEFAULTS["titulo"], PROMPTS["titulo"])
-    values["subtitulo"] = resolve(args.subtitulo, "", PROMPTS["subtitulo"]) or None
-    values["curso"] = resolve(args.curso, DEFAULTS["curso"], PROMPTS["curso"])
-    values["docente"] = resolve(args.docente, DEFAULTS["docente"], PROMPTS["docente"])
-    values["lugar"] = resolve(args.lugar, DEFAULTS["lugar"], PROMPTS["lugar"])
-    values["fecha"] = resolve(args.fecha, "dd - mm - aaaa", PROMPTS["fecha"])
-    values["idioma"] = resolve(args.idioma, "es", PROMPTS["idioma"])
+    values["titulo"] = resolve(args.titulo, DEFAULTS["titulo"])
+    values["subtitulo"] = resolve(args.subtitulo, "") or None
+    values["curso"] = resolve(args.curso, DEFAULTS["curso"])
+    values["docente"] = resolve(args.docente, DEFAULTS["docente"])
+    values["lugar"] = resolve(args.lugar, DEFAULTS["lugar"])
+    values["fecha"] = resolve(args.fecha, "dd - mm - aaaa")
+    values["idioma"] = resolve(args.idioma, "es")
 
     if args.integrante:
         values["integrantes"] = list(args.integrante)
-    elif interactive:
-        values["integrantes"] = ask_integrantes(DEFAULTS["integrantes"])
     else:
         values["integrantes"] = list(DEFAULTS["integrantes"])
 
     if args.sin_portada is not None:
         values["portada"] = not args.sin_portada
-    elif interactive:
-        values["portada"] = ask_yes_no("¿Mostrar portada?", True)
 
     if args.sin_indice is not None:
         values["indice"] = not args.sin_indice
-    elif interactive:
-        values["indice"] = ask_yes_no("¿Mostrar índice?", True)
 
     if args.sin_logo:
         values["logo_izquierdo"] = None
@@ -406,9 +329,11 @@ def build_parser() -> argparse.ArgumentParser:
             "Ejemplos:\n"
             "  %(prog)s                        crea la plantilla aquí mismo\n"
             "  %(prog)s mi-informe             crea la carpeta mi-informe con la plantilla\n"
-            "  %(prog)s -n --titulo 'Informe 1'  sin preguntas, con un título concreto\n"
+            "  %(prog)s --titulo 'Informe 1'   crea la plantilla con un título concreto\n"
             "\n"
-            "Después edita config.typ y compila con:  typst compile main.typ\n"
+            "El comando nunca pregunta nada: copia la plantilla y tú editas\n"
+            "los datos en config.typ.\n"
+            "Después compila con:  typst compile main.typ\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -423,7 +348,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-n",
         "--no-interactive",
         action="store_true",
-        help="no preguntar nada y usar los valores por defecto",
+        help="conservado por compatibilidad; el comando ya no pregunta nada",
     )
     parser.add_argument(
         "-f", "--force", action="store_true", help="sobrescribir ficheros que ya existan"
@@ -475,23 +400,17 @@ def run(argv) -> int:
 
         # Sin argumento, la plantilla se crea aquí mismo. Así se puede usar
         # solo con `informe`, sin escribir ninguna carpeta.
-        explicit = args.destino is not None
         destination = Path(args.destino or ".").expanduser().resolve()
         entries = list(payload(template))
 
         conflicts = existing_targets(destination, entries)
         if conflicts and not args.force:
             listing = "\n".join("    %s" % name for name in conflicts)
-            if explicit or args.no_interactive or not sys.stdin.isatty():
-                raise InformeError(
-                    "en %s ya existen estos archivos:\n%s\n"
-                    "Usa otra carpeta, o agrega --force para sobrescribirlos."
-                    % (destination, listing)
-                )
-            # En la carpeta actual se pregunta antes de perder trabajo.
-            out.warn("en %s ya existen %d archivos de la plantilla" % (destination, len(conflicts)))
-            if not ask_yes_no("¿Sobrescribirlos?", False):
-                raise InformeError("no se escribió nada")
+            raise InformeError(
+                "en %s ya existen estos archivos:\n%s\n"
+                "Usa otra carpeta, o agrega --force para sobrescribirlos."
+                % (destination, listing)
+            )
         elif conflicts:
             out.warn("sobrescribiendo %d archivos existentes" % len(conflicts))
 

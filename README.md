@@ -116,33 +116,15 @@ informe
 ```
 
 `informe` sin argumentos crea la plantilla **en la carpeta donde estás**, así
-que no tienes que escribir ninguna carpeta. Si la carpeta está vacía, te
-pregunta los datos de la portada y arma el proyecto:
+que no tienes que escribir ninguna carpeta. Copia todo tal cual y no pregunta
+nada: los datos de la portada (título, integrantes, curso, etc.) se rellenan
+después en `config.typ`.
 
 ```
-Título del informe [Título del informe]: Diseño de un Sistema de Inventarios
-Subtítulo (vacío para no ponerlo): FICHA 07
-Curso [Nombre del curso]: Análisis y Diseño de Sistemas
-Docente [Nombre del docente]: Ing. Juan Pérez Ramírez
-Lugar [Arequipa, Perú]:
-Fecha [dd - mm - aaaa]: 20 - 09 - 2026
-Idioma del documento (es/en) [es]:
-
-Integrantes (uno por línea, línea vacía para terminar):
-  Ramos Quinoa, Ana:
-  Ccahuana Mamani, Luis:
-
-¿Mostrar portada? [S/n]:
-¿Mostrar índice? [S/n]:
+informe
 ```
 
-Si no quieres preguntas, usa `-n` y rellena después:
-
-```sh
-informe -n
-```
-
-### Crear la plantilla en una carpeta nueva
+Para crear la plantilla en una carpeta nueva:
 
 ```sh
 informe mi-informe-02
@@ -150,7 +132,7 @@ informe mi-informe-02
 
 Crea `./mi-informe-02/` con la plantilla dentro.
 
-### Sin preguntas, todo por banderas
+### Todos los datos con banderas (opcional)
 
 ```sh
 informe ficha-07 \
@@ -170,7 +152,7 @@ informe ficha-07 \
 | Opción | Qué hace |
 | ------ | -------- |
 | `DESTINO` | Carpeta destino. Si se omite, se usa la carpeta actual. |
-| `-n`, `--no-interactive` | No pregunta nada; usa los valores por defecto. |
+| `-n`, `--no-interactive` | Conservado por compatibilidad; el comando ya no pregunta nada. |
 | `-f`, `--force` | Sobrescribe archivos que ya existan. |
 | `--titulo`, `--subtitulo`, `--curso`, `--docente` | Datos de la portada. |
 | `--integrante NOMBRE` | Un integrante. Repite la opción para agregar más. |
@@ -183,9 +165,8 @@ informe ficha-07 \
 | `-V`, `--version` | Muestra la versión instalada. |
 | `-h`, `--help` | Muestra la ayuda. |
 
-Si vuelves a ejecutar `informe` en una carpeta que ya tiene la plantilla, te
-pregunta antes de sobrescribir. Con `-n` no pregunta y te pide que agregues
-`-f`.
+Si vuelves a ejecutar `informe` en una carpeta que ya tiene la plantilla, no
+sobrescribe nada: te lo indica y debes agregar `-f` si quieres reemplazarla.
 
 ---
 
