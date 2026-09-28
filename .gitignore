@@ -1,0 +1,44 @@
+# Compiled output: PDFs are generated locally, they never get committed
+*.pdf
+
+# Typst caches and build folders
+_cache/
+.typst/
+/build/
+/dist/
+
+# LaTeX leftovers, in case a workflow is switched later
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+
+# Temporary files and editor backups
+*.tmp
+*.bak
+*~
+
+# OS cruft
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+desktop.ini
+
+# Editors and IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local environment
+.env
+.env.*
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
