@@ -1,0 +1,528 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""informe - crea una copia de la plantilla de informes en cualquier carpeta.
+
+La plantilla vive en un directorio de datos instalado junto a este script
+(por ejemplo ``~/.local/share/informe-plantilla``). Este comando la copia a la
+carpeta destino, opcionalmente rellenando los datos de la portada en
+``config.typ``. No compila nada: la compilación se hace con Typst.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import shutil
+import sys
+from pathlib import Path
+
+__version__ = "1.0.0"
+
+PROG = "informe"
+
+#: Ruta de la plantilla. install.sh la rellena al instalar; si está vacía se
+#: buscan las ubicaciones habituales. No hace falta editar esto a mano.
+INSTALLED_TEMPLATE_DIR = ""
+
+#: Nombre de la carpeta de datos donde el instalador deja la plantilla.
+TEMPLATE_SUBDIR = "informe-plantilla"
+
+#: Ficheros que se copian siempre desde la plantilla instalada.
+TEMPLATE_FILES = (
+    "plantilla.typ",
+    "config.typ",
+    "main.typ",
+    "referencias.bib",
+)
+
+#: Subcarpetas que se copian enteras desde la plantilla instalada.
+TEMPLATE_DIRS = (
+    "secciones",
+    "imagenes",
+)
+
+#: Ficheros imprescindibles para que el proyecto compile.
+REQUIRED_FILES = TEMPLATE_FILES
+
+#: Valores por defecto usados cuando se ejecuta sin interacción.
+DEFAULTS = {
+    "titulo": "Título del informe",
+    "subtitulo": None,
+    "curso": "Nombre del curso",
+    "docente": "Nombre del docente",
+    "lugar": "Arequipa, Perú",
+    "integrantes": ("Apellido Nombre",),
+}
+
+#: Sustituciones sobre config.typ: clave -> expresión regular.
+#: Cada patrón debe tener dos grupos: el prefijo que se conserva y un grupo
+#: llamado ``resto`` con lo que va detrás de la línea.
+PATTERNS = {
+    "titulo": r'(?m)^(#let\s+titulo\s*=\s*)(".*?"|none)(?P<resto>.*)$',
+    "subtitulo": r'(?m)^(#let\s+subtitulo\s*=\s*)(".*?"|none)(?P<resto>.*)$',
+    "curso": r'(?m)^(#let\s+curso\s*=\s*)(".*?"|none)(?P<resto>.*)$',
+    "docente": r'(?m)^(#let\s+docente\s*=\s*)(".*?"|none)(?P<resto>.*)$',
+    "lugar": r'(?m)^(#let\s+lugar\s*=\s*)(".*?"|none)(?P<resto>.*)$',
+    "fecha": r'(?m)^(#let\s+fecha\s*=\s*)(".*?"|none)(?P<resto>.*)$',
+    "idioma": r'(?m)^(#let\s+idioma\s*=\s*)(".*?"|none)(?P<resto>.*)$',
+    "integrantes": r"(?ms)^(#let\s+integrantes\s*=\s*)\(.*?^\)(?P<resto>.*)$",
+    "portada": r"(?m)^(#let\s+portada\s*=\s*)(true|false)(?P<resto>.*)$",
+    "indice": r"(?m)^(#let\s+indice\s*=\s*)(true|false)(?P<resto>.*)$",
+    "logo_izquierdo": r'(?m)^(#let\s+logo-izquierdo\s*=\s*)(".*?"|none)(?P<resto>.*)$',
+    "logo_derecho": r'(?m)^(#let\s+logo-derecho\s*=\s*)(".*?"|none)(?P<resto>.*)$',
+}
+
+#: Etiquetas que se muestran al preguntar por cada campo.
+PROMPTS = {
+    "titulo": "Título del informe",
+    "subtitulo": "Subtítulo (vacío para no ponerlo)",
+    "curso": "Curso",
+    "docente": "Docente",
+    "lugar": "Lugar",
+    "fecha": "Fecha",
+    "integrantes": "Integrante (vacío para terminar)",
+    "idioma": "Idioma del documento (es/en)",
+}
+
+
+class InformeError(Exception):
+    """Error esperado, mostrado al usuario sin traza."""
+
+
+# --------------------------------------------------------------------------
+# Presentación
+# --------------------------------------------------------------------------
+
+def _supports_color(stream) -> bool:
+    return bool(getattr(stream, "isatty", lambda: False)()) and os.environ.get("NO_COLOR") is None
+
+
+class Out:
+    """Impresión con color opcional y símbolos."""
+
+    def __init__(self, stream=None) -> None:
+        self.stream = stream or sys.stdout
+        self.color = _supports_color(self.stream)
+
+    def _paint(self, code: str, text: str) -> str:
+        if not self.color:
+            return text
+        return "\033[%sm%s\033[0m" % (code, text)
+
+    def ok(self, text: str) -> None:
+        print("%s %s" % (self._paint("32", "OK"), text), file=self.stream)
+
+    def info(self, text: str) -> None:
+        print(text, file=self.stream)
+
+    def warn(self, text: str) -> None:
+        print("%s %s" % (self._paint("33", "aviso:"), text), file=self.stream)
+
+    def step(self, text: str) -> None:
+        print("%s %s" % (self._paint("36", "->"), text), file=self.stream)
+
+    def hint(self, text: str) -> None:
+        print("   %s" % self._paint("90", text), file=self.stream)
+
+
+# --------------------------------------------------------------------------
+# Localización de la plantilla
+# --------------------------------------------------------------------------
+
+def template_dir() -> Path:
+    """Devuelve la ruta de la plantilla instalada.
+
+    El instalador deja grabada la ruta correcta dentro de este archivo, así que
+    normalmente el primer candidato que se prueba ya es el bueno. Se mantienen
+    las rutas relativas al script para que también funcione ejecutándolo
+    directamente desde un clon del repositorio.
+    """
+    candidates = []
+
+    if INSTALLED_TEMPLATE_DIR:
+        candidates.append(Path(INSTALLED_TEMPLATE_DIR).expanduser())
+
+    env = os.environ.get("INFORME_TEMPLATE_DIR")
+    if env:
+        candidates.append(Path(env).expanduser())
+
+    here = Path(__file__).resolve().parent
+    candidates.append(here / "share" / TEMPLATE_SUBDIR)
+    candidates.append(here.parent / "share" / TEMPLATE_SUBDIR)
+    candidates.append(here.parent / TEMPLATE_SUBDIR)
+    candidates.append(here.parent)
+    candidates.append(here)
+
+    for candidate in candidates:
+        if is_template_dir(candidate):
+            return candidate.resolve()
+
+    searched = "\n".join("    %s" % c for c in candidates)
+    raise InformeError(
+        "no se encuentra la plantilla instalada.\n"
+        "Busqué en:\n%s\n"
+        "Vuelve a instalarla con:  ./install.sh" % searched
+    )
+
+
+def is_template_dir(path: Path) -> bool:
+    return path.is_dir() and all((path / name).is_file() for name in REQUIRED_FILES)
+
+
+# --------------------------------------------------------------------------
+# Recorrido de la plantilla
+# --------------------------------------------------------------------------
+
+def payload(template: Path):
+    """Genera pares ``(ruta_relativa, es_directorio)`` del contenido a copiar."""
+    for name in TEMPLATE_FILES:
+        source = template / name
+        if source.is_file():
+            yield name, False
+        else:
+            raise InformeError("falta %s en la plantilla instalada (%s)" % (name, template))
+
+    for name in TEMPLATE_DIRS:
+        source = template / name
+        if not source.is_dir():
+            continue
+        for item in sorted(source.rglob("*")):
+            if any(part.startswith(".") for part in item.relative_to(source).parts):
+                continue
+            if item.is_dir():
+                yield os.path.join(name, str(item.relative_to(source))), True
+            elif item.is_file():
+                yield os.path.join(name, str(item.relative_to(source))), False
+
+
+def existing_targets(destination: Path, entries) -> list:
+    """Ficheros que ya existen en el destino y bloquearían la copia."""
+    return [rel for rel, is_dir in entries if not is_dir and (destination / rel).exists()]
+
+
+# --------------------------------------------------------------------------
+# Preguntas al usuario
+# --------------------------------------------------------------------------
+
+def ask(prompt: str, default=None) -> str:
+    """Pregunta algo. Si no hay terminal, devuelve el valor por defecto."""
+    if not sys.stdin.isatty():
+        return "" if default is None else default
+    suffix = ""
+    if default is not None and default != "":
+        suffix = " [%s]" % default
+    try:
+        answer = input("%s%s: " % (prompt, suffix)).strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        raise InformeError("cancelado por el usuario")
+    return answer or ("" if default is None else default)
+
+
+def ask_yes_no(prompt: str, default: bool) -> bool:
+    if not sys.stdin.isatty():
+        return default
+    suffix = " [S/n]" if default else " [s/N]"
+    try:
+        answer = input("%s%s: " % (prompt, suffix)).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        raise InformeError("cancelado por el usuario")
+    if not answer:
+        return default
+    return answer.startswith(("s", "y", "t"))
+
+
+def ask_integrantes(default) -> list:
+    """Pregunta por los integrantes, uno por línea, hasta dejar la línea vacía."""
+    if not sys.stdin.isatty():
+        return list(default)
+
+    print("\nIntegrantes (uno por línea, línea vacía para terminar):")
+    names = []
+    while True:
+        hint = "Apellido Nombre"
+        try:
+            answer = input("  %s: " % hint).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            raise InformeError("cancelado por el usuario")
+        if not answer:
+            break
+        names.append(answer)
+    if not names:
+        names = list(default)
+    print("  -> %d integrante(s)" % len(names))
+    return names
+
+
+def collect_values(args, out: Out) -> dict:
+    """Reúne los datos de portada: primero las banderas, luego las preguntas."""
+    interactive = not args.no_interactive and sys.stdin.isatty()
+
+    values = {}
+
+    def resolve(cli_value, default, question):
+        if cli_value is not None:
+            return cli_value
+        if interactive:
+            return ask(question, default)
+        return default
+
+    values["titulo"] = resolve(args.titulo, DEFAULTS["titulo"], PROMPTS["titulo"])
+    values["subtitulo"] = resolve(args.subtitulo, "", PROMPTS["subtitulo"]) or None
+    values["curso"] = resolve(args.curso, DEFAULTS["curso"], PROMPTS["curso"])
+    values["docente"] = resolve(args.docente, DEFAULTS["docente"], PROMPTS["docente"])
+    values["lugar"] = resolve(args.lugar, DEFAULTS["lugar"], PROMPTS["lugar"])
+    values["fecha"] = resolve(args.fecha, "dd - mm - aaaa", PROMPTS["fecha"])
+    values["idioma"] = resolve(args.idioma, "es", PROMPTS["idioma"])
+
+    if args.integrante:
+        values["integrantes"] = list(args.integrante)
+    elif interactive:
+        values["integrantes"] = ask_integrantes(DEFAULTS["integrantes"])
+    else:
+        values["integrantes"] = list(DEFAULTS["integrantes"])
+
+    if args.sin_portada is not None:
+        values["portada"] = not args.sin_portada
+    elif interactive:
+        values["portada"] = ask_yes_no("¿Mostrar portada?", True)
+
+    if args.sin_indice is not None:
+        values["indice"] = not args.sin_indice
+    elif interactive:
+        values["indice"] = ask_yes_no("¿Mostrar índice?", True)
+
+    if args.sin_logo:
+        values["logo_izquierdo"] = None
+        values["logo_derecho"] = None
+
+    if values.get("idioma") not in ("es", "en"):
+        out.warn("idioma %r no reconocido, se usará \"es\"" % values["idioma"])
+        values["idioma"] = "es"
+
+    return values
+
+
+# --------------------------------------------------------------------------
+# Escritura de config.typ
+# --------------------------------------------------------------------------
+
+def typst_string(value: str) -> str:
+    """Escapa un valor para poder escribirlo como cadena de Typst."""
+    escaped = (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", " ")
+        .replace("\r", " ")
+        .replace("\t", " ")
+    )
+    return '"%s"' % escaped
+
+
+def format_integrantes(names) -> str:
+    if not names:
+        return "()"
+    body = "\n".join("  %s," % typst_string(name) for name in names)
+    return "(\n%s\n)" % body
+
+
+def replacement_for(key: str, value) -> str:
+    """Devuelve el valor literal que sustituye al patrón de ``key``."""
+    if key == "integrantes":
+        return format_integrantes(value)
+    if key in ("portada", "indice"):
+        return "true" if value else "false"
+    if value is None:
+        return "none"
+    return typst_string(value)
+
+
+def apply_values(config_text: str, values: dict, out: Out) -> str:
+    """Reescribe las líneas de ``config.typ`` correspondientes a los datos."""
+    result = config_text
+    unresolved = []
+
+    for key, pattern in PATTERNS.items():
+        if key not in values:
+            continue
+        try:
+            compiled = re.compile(pattern)
+        except re.error as error:
+            raise InformeError("patrón interno inválido para %s: %s" % (key, error))
+        if "resto" not in compiled.groupindex:
+            raise InformeError("patrón interno incompleto para %s" % key)
+
+        literal = replacement_for(key, values[key])
+        result, count = compiled.subn(
+            lambda m, lit=literal: m.group(1) + lit + m.group("resto"), result
+        )
+        if count == 0:
+            unresolved.append(key)
+
+    if unresolved:
+        out.warn(
+            "no se pudo rellenar en config.typ: %s. Edítalo a mano."
+            % ", ".join(sorted(unresolved))
+        )
+
+    return result
+
+
+# --------------------------------------------------------------------------
+# Copia
+# --------------------------------------------------------------------------
+
+def copy_payload(template: Path, destination: Path, entries, out: Out) -> None:
+    for rel, is_dir in entries:
+        target = destination / rel
+        if is_dir:
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(template / rel, target)
+        out.hint(rel)
+
+
+def write_config(template: Path, destination: Path, values: dict, out: Out) -> None:
+    source = template / "config.typ"
+    target = destination / "config.typ"
+    text = apply_values(source.read_text(encoding="utf-8"), values, out)
+    target.write_text(text, encoding="utf-8")
+
+
+# --------------------------------------------------------------------------
+# Programa
+# --------------------------------------------------------------------------
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog=PROG,
+        description="Crea una plantilla de informe nueva en la carpeta que elijas.",
+        epilog=(
+            "Ejemplos:\n"
+            "  %(prog)s                        crea la plantilla aquí mismo\n"
+            "  %(prog)s mi-informe             crea la carpeta mi-informe con la plantilla\n"
+            "  %(prog)s -n --titulo 'Informe 1'  sin preguntas, con un título concreto\n"
+            "\n"
+            "Después edita config.typ y compila con:  typst compile main.typ\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "destino",
+        nargs="?",
+        default=None,
+        metavar="DESTINO",
+        help="carpeta donde crear la plantilla (por defecto, la carpeta actual)",
+    )
+    parser.add_argument(
+        "-n",
+        "--no-interactive",
+        action="store_true",
+        help="no preguntar nada y usar los valores por defecto",
+    )
+    parser.add_argument(
+        "-f", "--force", action="store_true", help="sobrescribir ficheros que ya existan"
+    )
+    parser.add_argument("--titulo", help="título del informe")
+    parser.add_argument("--subtitulo", help="subtítulo (omitir con la bandera o cadena vacía)")
+    parser.add_argument("--curso", help="nombre del curso")
+    parser.add_argument("--docente", help="nombre del docente")
+    parser.add_argument(
+        "--integrante",
+        action="append",
+        metavar="NOMBRE",
+        help="integrante; repetir la bandera para agregar más",
+    )
+    parser.add_argument("--lugar", help="lugar, por ejemplo 'Arequipa, Perú'")
+    parser.add_argument("--fecha", help="fecha, por ejemplo '14 - 07 - 2026'")
+    parser.add_argument("--idioma", choices=("es", "en"), help="idioma del documento")
+    parser.add_argument(
+        "--sin-portada", action="store_true", default=None, help="no generar la portada"
+    )
+    parser.add_argument(
+        "--sin-indice", action="store_true", default=None, help="no generar el índice"
+    )
+    parser.add_argument(
+        "--sin-logo", action="store_true", help="dejar los logos de la cabecera en none"
+    )
+    parser.add_argument(
+        "--plantilla",
+        metavar="DIR",
+        help="usar otra plantilla instalada (útil para desarrollo)",
+    )
+    parser.add_argument(
+        "-V", "--version", action="version", version="%(prog)s " + __version__
+    )
+    return parser
+
+
+def run(argv) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    out = Out()
+
+    try:
+        template = Path(args.plantilla).expanduser() if args.plantilla else template_dir()
+        if not is_template_dir(template):
+            raise InformeError(
+                "%s no es una plantilla válida (faltan archivos obligatorios)" % template
+            )
+
+        # Sin argumento, la plantilla se crea aquí mismo. Así se puede usar
+        # solo con `informe`, sin escribir ninguna carpeta.
+        explicit = args.destino is not None
+        destination = Path(args.destino or ".").expanduser().resolve()
+        entries = list(payload(template))
+
+        conflicts = existing_targets(destination, entries)
+        if conflicts and not args.force:
+            listing = "\n".join("    %s" % name for name in conflicts)
+            if explicit or args.no_interactive or not sys.stdin.isatty():
+                raise InformeError(
+                    "en %s ya existen estos archivos:\n%s\n"
+                    "Usa otra carpeta, o agrega --force para sobrescribirlos."
+                    % (destination, listing)
+                )
+            # En la carpeta actual se pregunta antes de perder trabajo.
+            out.warn("en %s ya existen %d archivos de la plantilla" % (destination, len(conflicts)))
+            if not ask_yes_no("¿Sobrescribirlos?", False):
+                raise InformeError("no se escribió nada")
+        elif conflicts:
+            out.warn("sobrescribiendo %d archivos existentes" % len(conflicts))
+
+        values = collect_values(args, out)
+
+        destination.mkdir(parents=True, exist_ok=True)
+        out.step("Creando la plantilla en %s" % destination)
+        copy_payload(template, destination, entries, out)
+        write_config(template, destination, values, out)
+
+        out.ok("Plantilla lista en %s" % destination)
+        print()
+        out.info("Siguientes pasos:")
+        out.hint("1. Edita %s con los datos de tu informe" % (destination / "config.typ"))
+        out.hint("2. Escribe tu informe en las carpetas dentro de %s" % (destination / "secciones"))
+        out.hint("3. Compila con:  typst compile main.typ")
+        return 0
+    except InformeError as error:
+        print("%s: %s" % (PROG, error), file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print(file=sys.stderr)
+        return 130
+    except OSError as error:
+        print("%s: error del sistema de archivos: %s" % (PROG, error), file=sys.stderr)
+        return 1
+
+
+def main() -> None:
+    sys.exit(run(sys.argv[1:]))
+
+
+if __name__ == "__main__":
+    main()
